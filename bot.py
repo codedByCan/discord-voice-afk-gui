@@ -1,217 +1,265 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
+import customtkinter as ctk
 import discord
 import asyncio
 import threading
 import json
 import os
+from tkinter import messagebox
+
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("dark-blue")
+
+SETTINGS_FILE = "config.json"
 
 class AFKBot(discord.Client):
-    def __init__(self, tab_controller, loop):
+    def __init__(self, ui_callback, loop):
         intents = discord.Intents.default()
         intents.guilds = True
         intents.voice_states = True
+        intents.presences = True
         super().__init__(intents=intents, loop=loop)
-        self.tab_controller = tab_controller
-        self.connected_voice_client = None
+        self.ui_callback = ui_callback
 
     async def on_ready(self):
-        self.tab_controller.update_guild_list(self.guilds)
-        self.tab_controller.update_status_label(f"Bağlandı: {self.user.name}")
-        self.tab_controller.enable_controls()
+        self.ui_callback("ready", self.guilds)
 
-    async def join_voice_channel(self, channel_id):
-        channel = self.get_channel(channel_id)
-        if channel:
-            try:
-                if self.connected_voice_client:
-                    await self.connected_voice_client.disconnect()
-                self.connected_voice_client = await channel.connect(self_deaf=True)
-                return True, "Sese bağlanıldı."
-            except Exception as e:
-                return False, str(e)
-        return False, "Kanal bulunamadı."
+    async def manage_voice(self, channel_id, is_mute, is_deaf):
+        try:
+            channel = self.get_channel(channel_id)
+            if not channel:
+                return False, "Kanal Bulunamadı"
 
-    async def change_presence_status(self, status_type, activity_text, status_mode):
-        s_mode = discord.Status.online
-        if status_mode == "Rahatsız Etmeyin": s_mode = discord.Status.dnd
-        elif status_mode == "Boşta": s_mode = discord.Status.idle
-        elif status_mode == "Görünmez": s_mode = discord.Status.invisible
+            if self.voice_clients:
+                vc = self.voice_clients[0]
+                if vc.channel.id == channel_id:
+                    await vc.edit(self_mute=is_mute, self_deaf=is_deaf)
+                    return True, "Ses Ayarları Güncellendi"
+                else:
+                    await vc.move_to(channel)
+                    await vc.edit(self_mute=is_mute, self_deaf=is_deaf)
+                    return True, f"Taşındı: {channel.name}"
+            else:
+                await channel.connect(self_mute=is_mute, self_deaf=is_deaf)
+                return True, f"Bağlandı: {channel.name}"
+        except Exception as e:
+            return False, str(e)
 
-        act = None
-        if activity_text:
-            if status_type == "Oynuyor":
-                act = discord.Game(name=activity_text)
-            elif status_type == "İzliyor":
-                act = discord.Activity(type=discord.ActivityType.watching, name=activity_text)
-            elif status_type == "Dinliyor":
-                act = discord.Activity(type=discord.ActivityType.listening, name=activity_text)
+    async def set_presence(self, status, activity_type, text):
+        try:
+            d_status = discord.Status.online
+            if status == "Rahatsız Etmeyin": d_status = discord.Status.dnd
+            elif status == "Boşta": d_status = discord.Status.idle
+            elif status == "Görünmez": d_status = discord.Status.invisible
 
-        await self.change_presence(status=s_mode, activity=act)
+            act = None
+            if text:
+                if activity_type == "Oynuyor": act = discord.Game(name=text)
+                elif activity_type == "İzliyor": act = discord.Activity(type=discord.ActivityType.watching, name=text)
+                elif activity_type == "Dinliyor": act = discord.Activity(type=discord.ActivityType.listening, name=text)
+                elif activity_type == "Yayında": act = discord.Streaming(name=text, url="https://twitch.tv/discord")
 
-class BotTab(ttk.Frame):
-    def __init__(self, parent, token):
-        super().__init__(parent)
+            await self.change_presence(status=d_status, activity=act)
+        except:
+            pass
+
+class BotPanel(ctk.CTkFrame):
+    def __init__(self, parent, token, config, save_cb):
+        super().__init__(parent, fg_color="transparent")
         self.token = token
-        self.bot_loop = asyncio.new_event_loop()
-        self.bot_client = AFKBot(self, self.bot_loop)
-        self.guild_map = {}
-        self.channel_map = {}
+        self.config = config
+        self.save_cb = save_cb
+        self.loop = asyncio.new_event_loop()
+        self.client = AFKBot(self.bot_callback, self.loop)
+        self.guilds_map = {}
+        self.channels_map = {}
+
         self.setup_ui()
-        self.thread = threading.Thread(target=self.start_bot_thread, daemon=True)
-        self.thread.start()
+        threading.Thread(target=self.start_bot, daemon=True).start()
 
     def setup_ui(self):
-        self.lbl_status = tk.Label(self, text="Bağlanıyor...", fg="blue", font=("Arial", 10, "bold"))
-        self.lbl_status.pack(pady=5)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)
 
-        frame_server = ttk.LabelFrame(self, text="Sunucu ve Kanal")
-        frame_server.pack(fill="x", padx=10, pady=5)
+        self.status_bar = ctk.CTkLabel(self, text="Bot Başlatılıyor...", font=("Roboto Medium", 14), text_color="#3B8ED0")
+        self.status_bar.grid(row=0, column=0, pady=(0, 20), sticky="w")
 
-        tk.Label(frame_server, text="Sunucu Seç:").grid(row=0, column=0, padx=5, pady=5)
-        self.cb_guilds = ttk.Combobox(frame_server, state="disabled")
-        self.cb_guilds.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.cb_guilds.bind("<<ComboboxSelected>>", self.on_guild_select)
-
-        tk.Label(frame_server, text="Ses Kanalı:").grid(row=1, column=0, padx=5, pady=5)
-        self.cb_channels = ttk.Combobox(frame_server, state="disabled")
-        self.cb_channels.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-
-        self.btn_join = ttk.Button(frame_server, text="Ses'e Gir (AFK)", command=self.join_voice, state="disabled")
-        self.btn_join.grid(row=2, column=0, columnspan=2, pady=10)
-
-        frame_status = ttk.LabelFrame(self, text="Durum ve Aktivite")
-        frame_status.pack(fill="x", padx=10, pady=5)
-
-        tk.Label(frame_status, text="Durum:").grid(row=0, column=0, padx=5)
-        self.cb_status_mode = ttk.Combobox(frame_status, values=["Çevrimiçi", "Rahatsız Etmeyin", "Boşta", "Görünmez"], state="readonly")
-        self.cb_status_mode.current(0)
-        self.cb_status_mode.grid(row=0, column=1, padx=5, pady=2)
-
-        tk.Label(frame_status, text="Tip:").grid(row=1, column=0, padx=5)
-        self.cb_act_type = ttk.Combobox(frame_status, values=["Oynuyor", "İzliyor", "Dinliyor"], state="readonly")
-        self.cb_act_type.current(0)
-        self.cb_act_type.grid(row=1, column=1, padx=5, pady=2)
-
-        tk.Label(frame_status, text="Açıklama:").grid(row=2, column=0, padx=5)
-        self.entry_act_text = ttk.Entry(frame_status)
-        self.entry_act_text.grid(row=2, column=1, padx=5, pady=2)
-
-        self.btn_update_status = ttk.Button(frame_status, text="Durumu Güncelle", command=self.update_presence, state="disabled")
-        self.btn_update_status.grid(row=3, column=0, columnspan=2, pady=5)
-
-    def start_bot_thread(self):
-        asyncio.set_event_loop(self.bot_loop)
-        try:
-            self.bot_loop.run_until_complete(self.bot_client.start(self.token))
-        except Exception as e:
-            self.update_status_label(f"Hata: {str(e)}")
-
-    def update_guild_list(self, guilds):
-        self.guild_map = {g.name: g for g in guilds}
-        self.cb_guilds['values'] = list(self.guild_map.keys())
-
-    def update_status_label(self, text):
-        self.lbl_status.config(text=text)
-
-    def enable_controls(self):
-        self.cb_guilds.config(state="readonly")
-        self.cb_channels.config(state="readonly")
-        self.btn_join.config(state="normal")
-        self.btn_update_status.config(state="normal")
-
-    def on_guild_select(self, event):
-        guild_name = self.cb_guilds.get()
-        guild = self.guild_map.get(guild_name)
-        if guild:
-            voice_channels = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
-            self.channel_map = {c.name: c.id for c in voice_channels}
-            self.cb_channels['values'] = list(self.channel_map.keys())
-            self.cb_channels.set('')
-
-    def join_voice(self):
-        channel_name = self.cb_channels.get()
-        channel_id = self.channel_map.get(channel_name)
-        if channel_id:
-            asyncio.run_coroutine_threadsafe(
-                self.bot_client.join_voice_channel(channel_id), 
-                self.bot_loop
-            )
-        else:
-            messagebox.showwarning("Uyarı", "Lütfen bir ses kanalı seçin.")
-
-    def update_presence(self):
-        st_mode = self.cb_status_mode.get()
-        act_type = self.cb_act_type.get()
-        act_text = self.entry_act_text.get()
+        voice_frame = ctk.CTkFrame(self, corner_radius=10)
+        voice_frame.grid(row=1, column=0, sticky="ew", pady=5)
         
-        asyncio.run_coroutine_threadsafe(
-            self.bot_client.change_presence_status(act_type, act_text, st_mode),
-            self.bot_loop
-        )
+        ctk.CTkLabel(voice_frame, text="SES BAĞLANTISI", font=("Roboto", 12, "bold"), text_color="gray").pack(anchor="w", padx=15, pady=(15, 5))
 
-class App(tk.Tk):
+        self.cb_guild = ctk.CTkComboBox(voice_frame, command=self.on_guild_change, values=["Yükleniyor..."])
+        self.cb_guild.pack(fill="x", padx=15, pady=5)
+        
+        self.cb_channel = ctk.CTkComboBox(voice_frame, values=[])
+        self.cb_channel.pack(fill="x", padx=15, pady=5)
+
+        switch_frame = ctk.CTkFrame(voice_frame, fg_color="transparent")
+        switch_frame.pack(fill="x", padx=15, pady=10)
+
+        self.sw_mute = ctk.CTkSwitch(switch_frame, text="Mikrofonu Kapat", command=self.quick_update)
+        self.sw_mute.pack(side="left", padx=(0, 20))
+        if self.config.get("mute", True): self.sw_mute.select()
+        
+        self.sw_deaf = ctk.CTkSwitch(switch_frame, text="Sağırlaştır", command=self.quick_update)
+        self.sw_deaf.pack(side="left")
+        if self.config.get("deaf", False): self.sw_deaf.select()
+
+        self.btn_join = ctk.CTkButton(voice_frame, text="Bağlan / Güncelle", command=self.do_join, height=35)
+        self.btn_join.pack(fill="x", padx=15, pady=(5, 15))
+
+        presence_frame = ctk.CTkFrame(self, corner_radius=10)
+        presence_frame.grid(row=2, column=0, sticky="ew", pady=15)
+
+        ctk.CTkLabel(presence_frame, text="DURUM & AKTİVİTE", font=("Roboto", 12, "bold"), text_color="gray").pack(anchor="w", padx=15, pady=(15, 5))
+
+        self.cb_status = ctk.CTkComboBox(presence_frame, values=["Çevrimiçi", "Rahatsız Etmeyin", "Boşta", "Görünmez"])
+        self.cb_status.set(self.config.get("status", "Çevrimiçi"))
+        self.cb_status.pack(fill="x", padx=15, pady=5)
+
+        self.cb_act_type = ctk.CTkComboBox(presence_frame, values=["Oynuyor", "İzliyor", "Dinliyor", "Yayında"])
+        self.cb_act_type.set(self.config.get("act_type", "Oynuyor"))
+        self.cb_act_type.pack(fill="x", padx=15, pady=5)
+
+        self.ent_act_text = ctk.CTkEntry(presence_frame, placeholder_text="Aktivite metni...")
+        self.ent_act_text.insert(0, self.config.get("act_text", ""))
+        self.ent_act_text.pack(fill="x", padx=15, pady=5)
+
+        self.btn_presence = ctk.CTkButton(presence_frame, text="Durumu İşle", command=self.do_presence, height=35, fg_color="#2B2D31", hover_color="#3F4148")
+        self.btn_presence.pack(fill="x", padx=15, pady=(5, 15))
+
+    def start_bot(self):
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self.client.start(self.token))
+        except Exception as e:
+            self.status_bar.configure(text=f"Hata: {str(e)[:30]}...", text_color="red")
+
+    def bot_callback(self, type, data):
+        if type == "ready":
+            self.status_bar.configure(text=f"Aktif: {self.client.user.name}", text_color="#2CC170")
+            self.guilds_map = {g.name: g for g in data}
+            self.cb_guild.configure(values=list(self.guilds_map.keys()))
+            
+            saved_g = self.config.get("guild")
+            saved_c = self.config.get("channel")
+            
+            if saved_g in self.guilds_map:
+                self.cb_guild.set(saved_g)
+                self.on_guild_change(saved_g)
+                if saved_c and saved_c in self.channels_map:
+                    self.cb_channel.set(saved_c)
+            
+            self.do_presence()
+
+    def on_guild_change(self, choice):
+        guild = self.guilds_map.get(choice)
+        if guild:
+            chans = [c for c in guild.channels if isinstance(c, discord.VoiceChannel)]
+            self.channels_map = {c.name: c.id for c in chans}
+            self.cb_channel.configure(values=list(self.channels_map.keys()))
+            self.cb_channel.set("")
+
+    def quick_update(self):
+        if self.client.is_ready():
+            self.do_join()
+
+    def do_join(self):
+        c_name = self.cb_channel.get()
+        c_id = self.channels_map.get(c_name)
+        if not c_id: return
+
+        mute = self.sw_mute.get() == 1
+        deaf = self.sw_deaf.get() == 1
+
+        async def _run():
+            res, msg = await self.client.manage_voice(c_id, mute, deaf)
+            print(msg)
+        
+        asyncio.run_coroutine_threadsafe(_run(), self.loop)
+        self.save_config()
+
+    def do_presence(self):
+        st = self.cb_status.get()
+        at = self.cb_act_type.get()
+        txt = self.ent_act_text.get()
+
+        asyncio.run_coroutine_threadsafe(self.client.set_presence(st, at, txt), self.loop)
+        self.save_config()
+
+    def save_config(self):
+        data = {
+            "token": self.token,
+            "guild": self.cb_guild.get(),
+            "channel": self.cb_channel.get(),
+            "mute": self.sw_mute.get() == 1,
+            "deaf": self.sw_deaf.get() == 1,
+            "status": self.cb_status.get(),
+            "act_type": self.cb_act_type.get(),
+            "act_text": self.ent_act_text.get()
+        }
+        self.save_cb(self.token, data)
+
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Discord Ses AFK Yöneticisi")
-        self.geometry("400x500")
-        self.saved_tokens_file = "tokens.json"
-
-        frame_top = tk.Frame(self, bg="#2C2F33")
-        frame_top.pack(fill="x", padx=10, pady=10)
+        self.title("AFK Manager Pro github.com/codedByCan")
+        self.geometry("900x600")
         
-        tk.Label(frame_top, text="Bot Token:", bg="#2C2F33", fg="white").pack(side="left")
-        self.entry_token = ttk.Entry(frame_top, width=30)
-        self.entry_token.pack(side="left", padx=5)
-        
-        btn_add = ttk.Button(frame_top, text="Bot Ekle", command=self.add_bot_manual)
-        btn_add.pack(side="left")
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
-        
-        self.load_saved_tokens()
+        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.grid_rowconfigure(2, weight=1)
 
-    def load_saved_tokens(self):
-        if os.path.exists(self.saved_tokens_file):
+        ctk.CTkLabel(self.sidebar, text="AFK MANAGER", font=("Roboto", 20, "bold")).grid(row=0, column=0, padx=20, pady=20)
+
+        self.entry_token = ctk.CTkEntry(self.sidebar, placeholder_text="Bot Token")
+        self.entry_token.grid(row=1, column=0, padx=10, pady=10)
+        
+        ctk.CTkButton(self.sidebar, text="+ Bot Ekle", command=self.add_bot).grid(row=2, column=0, padx=10, pady=5, sticky="n")
+
+        self.scroll_frame = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
+        self.scroll_frame.grid(row=3, column=0, sticky="nsew")
+
+        self.main_area = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_area.grid(row=0, column=1, sticky="nsew", padx=20, pady=20)
+
+        self.configs = self.load_configs()
+        self.current_frame = None
+
+        for token in self.configs:
+            self.create_nav_btn(token)
+
+    def load_configs(self):
+        if os.path.exists(SETTINGS_FILE):
             try:
-                with open(self.saved_tokens_file, "r") as f:
-                    data = json.load(f)
-                    for token in data.get("tokens", []):
-                        self.create_tab(token)
-            except:
-                pass
+                with open(SETTINGS_FILE, "r") as f: return json.load(f)
+            except: return {}
+        return {}
 
-    def save_new_token(self, token):
-        tokens = []
-        if os.path.exists(self.saved_tokens_file):
-            try:
-                with open(self.saved_tokens_file, "r") as f:
-                    data = json.load(f)
-                    tokens = data.get("tokens", [])
-            except:
-                pass
-        
-        if token not in tokens:
-            tokens.append(token)
-            with open(self.saved_tokens_file, "w") as f:
-                json.dump({"tokens": tokens}, f)
+    def save_all(self, token, data):
+        self.configs[token] = data
+        with open(SETTINGS_FILE, "w") as f: json.dump(self.configs, f, indent=4)
 
-    def add_bot_manual(self):
+    def add_bot(self):
         token = self.entry_token.get().strip()
-        if not token:
-            messagebox.showerror("Hata", "Token boş olamaz!")
-            return
-        
-        self.save_new_token(token)
-        self.create_tab(token)
-        self.entry_token.delete(0, tk.END)
+        if token and token not in self.configs:
+            self.configs[token] = {}
+            self.create_nav_btn(token)
+            self.entry_token.delete(0, "end")
+            self.show_bot(token)
 
-    def create_tab(self, token):
-        tab_name = f"Bot {len(self.notebook.tabs()) + 1}" 
-        new_tab = BotTab(self.notebook, token)
-        self.notebook.add(new_tab, text=tab_name)
-        self.notebook.select(new_tab)
+    def create_nav_btn(self, token):
+        name = f"Bot {token[-4:]}"
+        btn = ctk.CTkButton(self.scroll_frame, text=name, command=lambda t=token: self.show_bot(t), fg_color="transparent", border_width=1, text_color=("gray10", "#DCE4EE"))
+        btn.pack(fill="x", padx=5, pady=2)
+
+    def show_bot(self, token):
+        if self.current_frame: self.current_frame.destroy()
+        self.current_frame = BotPanel(self.main_area, token, self.configs[token], self.save_all)
+        self.current_frame.pack(fill="both", expand=True)
 
 if __name__ == "__main__":
     app = App()
