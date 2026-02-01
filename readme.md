@@ -32,7 +32,7 @@ A simple, user-friendly GUI tool built with Python to manage multiple Discord bo
 2.  **Install dependencies**
     You need Python installed. Then run:
     ```bash
-    pip install discord.py
+    pip install discord.py pynacl customtkinter
     ```
     *(Note: Tkinter usually comes pre-installed with Python. If not, you may need to install `python-tk` depending on your OS).*
 
@@ -82,4 +82,5 @@ This project is licensed under the MIT License.
 ---
 
 **Developed by [Can](https://github.com/codedByCan)**
+
 
