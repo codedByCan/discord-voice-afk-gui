@@ -17,7 +17,8 @@ A simple, user-friendly GUI tool built with Python to manage multiple Discord bo
 
 ## 📷 Screenshots
 
-*(You can add a screenshot of your app here later. e.g. `![App Screenshot](screenshot.png)`)*
+<img width="488" height="595" alt="image" src="https://github.com/user-attachments/assets/99784d38-5495-4b4d-9136-df1ceb0eda0b" />
+
 
 ## 🛠️ Installation
 
@@ -78,4 +79,5 @@ Contributions, issues, and feature requests are welcome!
 This project is licensed under the MIT License.
 
 ---
+
 **Developed by [Can](https://github.com/codedByCan)**
